@@ -4,15 +4,15 @@
 # This is a starter notebook for the project, you'll have to import the libraries you'll need, you can find a list of the ones available in this workspace in the requirements.txt file in this workspace.
 
 import os
-from langchain_community.chat_models import ChatOpenAI
+from langchain_openai.chat_models import ChatOpenAI
 import csv
 from langchain.prompts import PromptTemplate, ChatPromptTemplate
-from langchain.document_loaders.csv_loader import CSVLoader
-from langchain.document_loaders import UnstructuredImageLoader
-from langchain.embeddings.openai import OpenAIEmbeddings
-#from langchain.open_clip import OpenClipEmbeddings
+from langchain_community.document_loaders.csv_loader import CSVLoader
+from langchain_openai.embeddings import OpenAIEmbeddings
+from langchain_experimental.open_clip.open_clip import OpenCLIPEmbeddings
 
-from langchain.vectorstores import Chroma
+from langchain_chroma.vectorstores import Chroma
+from langchain_community.vectorstores import LanceDB
 import chromadb
 from langchain.chains import RetrievalQA
 import json
@@ -24,14 +24,14 @@ import shutil
 os.environ["OPENAI_API_KEY"] = "voc-6285383661266773632486678b43fb075333.75365710"
 os.environ["OPENAI_API_BASE"] = "https://openai.vocareum.com/v1"
 
+regenerate_listings = False
+multi_modal_mode = False
+
 llm = ChatOpenAI(
     model="gpt-3.5-turbo",
     temperature=0
 )
 
-# Generate 10 real-estate listings using LLM. We instruct the LLM to structure the listings based on provided exmaple.
-# We generate 1 listing at a time to account for LLM's context window, and pass summaries of already generated listings
-# to prevent generating repeated/duplicated listings.
 example_listing = """
 Neighborhood: Green Oaks
 Price: $800,000
@@ -44,7 +44,8 @@ Description: Welcome to this eco-friendly oasis nestled in the heart of Green Oa
 Neighborhood Description: Green Oaks is a close-knit, environmentally-conscious community with access to organic grocery stores, community gardens, and bike paths. Take a stroll through the nearby Green Oaks Park or grab a cup of coffee at the cozy Green Bean Cafe. With easy access to public transportation and bike lanes, commuting is a breeze.
 """
 
-base_prompt = "Generate a realistic and detailed real estate listing. You can refer to the provided example for how to structure the real estate listing:\n {example}"
+base_prompt = ("Generate a realistic and detailed real estate listing. You can refer to the provided example for how to "
+               "structure the real estate listing:\n {example}")
 prompt = PromptTemplate.from_template(
     base_prompt + "\n\n Do not repeat already generated listings: {generated_listings}")
 summarization_prompt = PromptTemplate.from_template(
@@ -56,10 +57,12 @@ summarization_chain = summarization_prompt | llm
 listings = []
 summaries = []
 
-regenerate_listings = False
 generate_listings = not os.path.exists("generated-real-estate-listings.csv") or regenerate_listings
 
 if generate_listings:
+    # Generate 10 real-estate listings using LLM.
+    # We generate 1 listing at a time to account for LLM's context window, and pass summaries of already generated listings
+    # to prevent generating repeated/duplicated listings.
     for i in range(10):
         listing = generation_chain.invoke({"example": example_listing, "generated_listings": summaries})
         listings.append(listing.content)
@@ -90,15 +93,15 @@ db = Chroma(
 
 db.add_documents(documents=listings_data)
 
-# Load real estate images in a Vector database.
-#clip_embeddings = OpenCLIPEmbeddings(model_name="ViT-g-14", checkpoint="laion2b_s34b_b88k")
-#listings_image_data = [UnstructuredImageLoader("real-estate-image{row + 1}.jpg").load()[0] for row in range(10)]
-#db_images = Chroma(
-#    client=persistent_client,
-#    collection_name="real-estate-listings-images",
-#    embedding_function=clip_embeddings,
-#)
-#db_images.add_documents(documents=listings_image_data)
+if multi_modal_mode:
+    # Load real estate images in a Vector database.
+    clip_embeddings = OpenCLIPEmbeddings(model_name="ViT-g-14", checkpoint="laion2b_s34b_b88k")
+    db_images = LanceDB(
+        table_name="real_estate_images",
+        embedding=clip_embeddings,
+    )
+    image_uris = [ f"real-estate-image{row + 1}.jpg" for row in range(10) ]
+    db_images.add_images(uris=image_uris)
 
 questions = [
     "How big do you want your house to be?"
@@ -106,22 +109,33 @@ questions = [
     "Which amenities would you like?",
     "Which transportation options are important to you?",
     "How urban do you want your neighborhood to be?",
+    "What exterior color would you like your house to have?"
 ]
 answers = [
     "A comfortable 3-bedroom house with a spacious kitchen and a cozy living room.",
     "A quiet neighborhood, good local schools, and shopping malls.",
     "A backyard for gardening, a two-car garage, and a modern, energy-efficient heating system.",
     "Easy access to a reliable bus line, nearby parks, and bike-friendly roads.",
-    "A balance between suburban tranquility and access to urban amenities like restaurants and theaters." \
+    "A balance between suburban tranquility and access to urban amenities like restaurants and theaters.",
+    "Tuscan yellow will be cool."
     ]
 
+visual_questions = [
+    "What exterior color would you like your house to have?"
+]
+visual_answers = [
+    "Tuscan yellow will be cool."
+]
+
 user_preferences = [{"criteria": question, "user_response": answer} for question, answer in zip(questions, answers)]
+user_visual_preferences = [{"criteria": question, "user_response": answer} for question, answer in zip(visual_questions, visual_answers)]
 
 summarization_prompt = PromptTemplate.from_template(
     "Summarize briefly, capturing essential details of user preferences based on provided questions and answers: {user_preferences}")
 summarization_chain = summarization_prompt | llm
 
 user_preference_summary = summarization_chain.invoke({"user_preferences": user_preferences})
+user_visual_preference_summary = summarization_chain.invoke({"user_preferences": user_visual_preferences})
 
 display({'text/plain': f"## Summary of user preferences\n{user_preference_summary.content}\n",
          'text/markdown': f"## Summary of user preferences\n{user_preference_summary.content}\n"},
@@ -141,12 +155,16 @@ max_attempts = 3
 attempts = 0
 matching_listings = []
 while (len(matching_listings) == 0 and attempts < max_attempts):
-    matching_listings = json.loads(
-        rag.invoke(selection_prompt.format(question=user_preference_summary.content)).replace("```json\n", "").replace(
-            "\n```", ""))
+    llm_response = rag.invoke(selection_prompt.format(question=user_preference_summary.content))
+    print(llm_response)
+    matching_listings = json.loads(llm_response['result'].replace("```json\n", "").replace("```", ""))
     attempts += 1
 
 print(f"Listing numbers from LLM: {matching_listings}")
+
+if multi_modal_mode:
+    image_results = db_images.similarity_search_by_vector(db_images._embedding.embed_query(user_visual_preference_summary.content))
+    print(f"Image results: {image_results}")
 
 description_prompt = ChatPromptTemplate.from_messages(
     [("system",
@@ -177,7 +195,7 @@ for matching_listing, recommendation in zip(matching_listings, recommendations):
     display(Markdown(f"### Listing {row}\n"))
     img = Image.open(f"real-estate-image{row + 1}.jpg")
     img.show()
-    display(Markdown(recommendation))
+    display(Markdown(f""))
     display({'text/plain': recommendation,
              'text/markdown': recommendation},
             raw=True)
