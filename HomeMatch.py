@@ -14,7 +14,7 @@ from langchain.chains import RetrievalQA
 from IPython.display import Markdown, display
 import re
 
-os.environ["OPENAI_API_KEY"] = "voc-6285383661266773632486678b43fb075333.75365710"
+os.environ["OPENAI_API_KEY"] = "<Your-OpenAI-Key>"
 os.environ["OPENAI_API_BASE"] = "https://openai.vocareum.com/v1"
 
 regenerate_listings = False
